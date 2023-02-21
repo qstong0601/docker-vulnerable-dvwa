@@ -1,0 +1,62 @@
+version: 0.2
+env:
+  secrets-manager:
+    SNYK_TOKEN: $SNYK_TOKEN_ARN:SNYK_TOKEN
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+  build:
+    on-failure: CONTINUE
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - export timestamp=$(date +%Y%m%d%H%M%S)
+      - docker build -t $IMAGE_REPO_NAME:$timestamp .
+      - docker tag $IMAGE_REPO_NAME:$timestamp $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$timestamp
+      # SCA
+      - set +e
+      - docker run --rm --env SNYK_TOKEN -v /var/run/docker.sock:/var/run/docker.sock -v $PWD:/app snyk/snyk:docker snyk test --docker $IMAGE_REPO_NAME:$timestamp --severity-threshold=critical --json-file-output=/app/sca_vuln.json; exit_code_sca=$?
+      - echo $exit_code_sca
+      # SAST
+      - docker run --rm --env SNYK_TOKEN -v $PWD:/app snyk/snyk:docker snyk code test --json-file-output=/app/sast_vuln.json; exit_code_sast=$?
+      - echo $exit_code_sast
+      # DAST
+      - docker network create zap-network
+      - docker run --rm --name $IMAGE_REPO_NAME -d -p 8080:$CONTAINER_PORT --network zap-network $IMAGE_REPO_NAME:$timestamp
+      - docker run --rm --network zap-network -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -I -j -t http://$IMAGE_REPO_NAME:8080 -g gen.conf -r $IMAGE_REPO_NAME_$timestamp.html
+
+  post_build:
+    commands:
+      - echo SCA scan reports to S3 for record keeping
+      - aws s3 cp sca_vuln.json s3://poc-mc-devsecops-reports/$IMAGE_REPO_NAME/sca/sca_$IMAGE_REPO_NAME_$timestamp.json
+      - echo generating a pre-signed url for sharing later
+      - PRESIGNED_URL_SCA=$(aws s3 presign s3://poc-mc-devsecops-reports/$IMAGE_REPO_NAME/sca/sca_$IMAGE_REPO_NAME_$timestamp.json)
+
+      - echo SAST scan reports to S3 for record keeping
+      - aws s3 cp sast_vuln.json s3://poc-mc-devsecops-reports/$IMAGE_REPO_NAME/sast/sast_$IMAGE_REPO_NAME_$timestamp.json
+      - echo generating a pre-signed url for sharing later
+      - PRESIGNED_URL_SAST=$(aws s3 presign s3://poc-mc-devsecops-reports/$IMAGE_REPO_NAME/sast/sast_$IMAGE_REPO_NAME_$timestamp.json)
+      - echo Sending pre-signed URL to Slack...
+      - >- 
+        curl -X POST -H 'Content-type:application/json' --data "{\"text\": \"SCA Report of ${IMAGE_REPO_NAME}:${timestamp} ${PRESIGNED_URL_SCA}\"}" $SLACK_WEBHOOK
+      - >- 
+        curl -X POST -H 'Content-type:application/json' --data "{\"text\": \"SAST Report of ${IMAGE_REPO_NAME}:${timestamp} ${PRESIGNED_URL_SAST}\"}" $SLACK_WEBHOOK
+      - |
+        if [ $exit_code_sca -eq 0 ] && [ $exit_code_sast -eq 0 ]; then 
+          echo Build completed on `date`;
+          echo Pushing the Docker image...;
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$timestamp;
+          curl -X POST -H 'Content-type:application/json' --data "{\"text\": \"Build ${IMAGE_REPO_NAME}:${timestamp} succeeded\"}" $SLACK_WEBHOOK
+        fi
+      - |
+        if [ $exit_code_sca -ne 0 ]; then
+          echo build failed due to non zero sca exit code
+          curl -X POST -H 'Content-type:application/json' --data "{\"text\": \"Build ${IMAGE_REPO_NAME}:${timestamp} failed due to non zero SCA exit code ${exit_code_sca}\"}" $SLACK_WEBHOOK
+        fi
+      - |
+        if [ $exit_code_sast -ne 0 ]; then
+          echo build failed due to non zero sast exit code
+          curl -X POST -H 'Content-type:application/json' --data "{\"text\": \"Build ${IMAGE_REPO_NAME}:${timestamp} failed due to non zero SAST exit code ${exit_code_sast}\"}" $SLACK_WEBHOOK
+        fi
