@@ -3,7 +3,7 @@ FROM 456403635917.dkr.ecr.us-east-1.amazonaws.com/debian:9.2
 LABEL maintainer "opsxcq@strm.sh"
 
 RUN apt-get update && \
-    apt-get install dialog apt-utils && \
+    apt-get install dialog apt-utils -y && \
     apt-get upgrade -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     debconf-utils && \
