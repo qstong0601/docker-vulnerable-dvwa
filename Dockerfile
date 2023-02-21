@@ -1,4 +1,4 @@
-FROM debian:9.2
+FROM 456403635917.dkr.ecr.us-east-1.amazonaws.com/debian:9.2
 
 LABEL maintainer "opsxcq@strm.sh"
 
